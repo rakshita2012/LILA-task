@@ -32,7 +32,6 @@ NON_PARQUET_EXTENSIONS = {
     ".jpeg",
     ".md",
     ".txt",
-    ".csv",
     ".json",
     ".toml",
     ".ds_store",
@@ -77,16 +76,85 @@ def list_data_files(data_dir: str) -> List[str]:
 @st.cache_data(show_spinner=False)
 def load_parquet_file(file_path: str, columns: Tuple[str, ...] | None = None) -> pd.DataFrame:
     """Read a parquet file defensively. Returns empty dataframe on failure."""
+    use_columns = list(columns) if columns is not None else None
+
     try:
-        use_columns = list(columns) if columns is not None else None
         dataframe = pd.read_parquet(file_path, columns=use_columns, engine="pyarrow")
-
-        if "ts" in dataframe.columns:
-            dataframe["ts"] = pd.to_datetime(dataframe["ts"], errors="coerce")
-
-        return dataframe
+        return _enrich_columns(dataframe, file_path)
     except Exception:
-        return pd.DataFrame()
+        try:
+            # Retry full read because some files may miss requested columns.
+            dataframe = pd.read_parquet(file_path, engine="pyarrow")
+            if use_columns is not None:
+                existing = [column for column in use_columns if column in dataframe.columns]
+                dataframe = dataframe[existing]
+            return _enrich_columns(dataframe, file_path)
+        except Exception:
+            return pd.DataFrame()
+
+
+def _normalize_is_bot_value(value: object) -> object:
+    """Normalize mixed bool/string values into booleans."""
+    if pd.isna(value):
+        return pd.NA
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return pd.NA
+
+
+def _infer_is_bot(frame: pd.DataFrame) -> pd.Series:
+    """Infer is_bot when source data does not provide it explicitly."""
+    inferred = pd.Series(pd.NA, index=frame.index, dtype="boolean")
+
+    if "event" in frame.columns:
+        inferred.loc[frame["event"] == "BotPosition"] = True
+        inferred.loc[frame["event"] == "Position"] = False
+
+    if {"user_id", "event"}.issubset(frame.columns):
+        bot_user_map = (
+            frame.assign(_bot_evt=frame["event"] == "BotPosition")
+            .groupby("user_id")["_bot_evt"]
+            .any()
+            .to_dict()
+        )
+        inferred = inferred.mask(inferred.isna(), frame["user_id"].map(bot_user_map))
+
+    return inferred.astype("boolean")
+
+
+def _enrich_columns(dataframe: pd.DataFrame, file_path: str) -> pd.DataFrame:
+    """Standardize schema across parquet variants."""
+    if dataframe.empty:
+        return dataframe
+
+    frame = dataframe.copy()
+
+    if "ts" in frame.columns:
+        frame["ts"] = pd.to_datetime(frame["ts"], errors="coerce")
+
+    if "date" not in frame.columns or frame["date"].isna().all():
+        frame["date"] = os.path.basename(os.path.dirname(file_path))
+
+    if "source_file" not in frame.columns:
+        frame["source_file"] = os.path.basename(file_path)
+    else:
+        frame["source_file"] = frame["source_file"].fillna(os.path.basename(file_path))
+
+    if "is_bot" not in frame.columns:
+        frame["is_bot"] = pd.NA
+
+    frame["is_bot"] = frame["is_bot"].map(_normalize_is_bot_value).astype("boolean")
+
+    inferred = _infer_is_bot(frame)
+    frame["is_bot"] = frame["is_bot"].mask(frame["is_bot"].isna(), inferred)
+    frame["is_bot"] = frame["is_bot"].fillna(False).astype("boolean")
+
+    return frame
 
 
 @st.cache_data(show_spinner=False)
