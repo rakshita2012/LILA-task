@@ -1,13 +1,11 @@
-﻿"""LILA Games Player Journey Visualization Tool."""
+"""LILA BLACK Mission Control dashboard."""
 
 from __future__ import annotations
 
+import io
 import os
 import time
-from typing import Dict, List
 
-import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
@@ -24,395 +22,352 @@ from utils.data_loader import (
 )
 from utils.heatmap import build_heatmap_trace
 
-st.set_page_config(
-    page_title="LILA BLACK - Player Journey Visualization",
-    page_icon=":video_game:",
-    layout="wide",
-)
+st.set_page_config(page_title="LILA BLACK // Mission Control", page_icon="🎯", layout="wide")
 
-MAP_OPTIONS = ["AmbroseValley", "GrandRift", "Lockdown"]
-
-EVENT_STYLE = {
-    "BotKill": {"color": "#ff9f1c", "symbol": "triangle-up", "size": 11},
-    "BotKilled": {"color": "#ff7f11", "symbol": "triangle-down", "size": 11},
-    "Kill": {"color": "#ff2b2b", "symbol": "circle", "size": 10},
-    "Killed": {"color": "#8b0000", "symbol": "circle", "size": 9},
-    "KilledByStorm": {"color": "#9b5de5", "symbol": "diamond", "size": 10},
-    "Loot": {"color": "#ffd60a", "symbol": "star", "size": 10},
+PALETTE = {
+    "bg": "#0A0A0F",
+    "surface": "#12121A",
+    "border": "#1E1E2E",
+    "cyan": "#00F5FF",
+    "red": "#FF3B3B",
+    "amber": "#FFB800",
+    "green": "#00FF88",
+    "storm": "#9B59FF",
+    "muted": "#6B7280",
+    "text": "#E2E8F0",
 }
 
-HEATMAP_OPTIONS = ["Kill heatmap", "Death heatmap", "Traffic heatmap", "Loot heatmap"]
+MAP_OPTIONS = ["AmbroseValley", "GrandRift", "Lockdown"]
+HEATMAPS = ["Kill heatmap", "Death heatmap", "Traffic heatmap", "Loot heatmap"]
+
+EVENT_STYLE = {
+    "BotKill": {"color": "#FFB800", "symbol": "triangle-up", "size": 11},
+    "BotKilled": {"color": "#FFB800", "symbol": "triangle-down", "size": 11},
+    "Kill": {"color": "#FF3B3B", "symbol": "circle", "size": 10},
+    "Killed": {"color": "#8B1D1D", "symbol": "circle", "size": 9},
+    "KilledByStorm": {"color": "#9B59FF", "symbol": "diamond", "size": 10},
+    "Loot": {"color": "#FFB800", "symbol": "star", "size": 10},
+}
+
+
+def to_text(value) -> str:
+    """Ensure dataframe labels are JSON-serializable strings."""
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.decode("latin-1", errors="ignore")
+    return str(value)
+
+
+def css() -> None:
+    st.markdown(
+        f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap');
+:root{{--bg:{PALETTE["bg"]};--surface:{PALETTE["surface"]};--border:{PALETTE["border"]};--cyan:{PALETTE["cyan"]};--red:{PALETTE["red"]};--amber:{PALETTE["amber"]};--storm:{PALETTE["storm"]};--green:{PALETTE["green"]};--muted:{PALETTE["muted"]};--text:{PALETTE["text"]};}}
+#MainMenu,footer,header{{visibility:hidden;}}
+[data-testid="stAppViewContainer"]{{background:var(--bg);}}
+[data-testid="stSidebar"]{{background:#0D0D14;border-right:1px solid var(--border);}}
+.block-container{{max-width:100%;padding:.7rem 1.2rem;}}
+.top{{background:var(--surface);border:1px solid var(--border);border-bottom:1px solid var(--cyan);border-radius:6px;padding:12px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;}}
+.title{{font:700 28px 'Rajdhani',sans-serif;color:var(--cyan);letter-spacing:.8px;}}
+.sub{{font:14px 'Inter',sans-serif;color:var(--muted);}}
+@keyframes pulse{{0%{{opacity:1}}50%{{opacity:.3}}100%{{opacity:1}}}}
+.live{{font:600 14px 'Rajdhani',sans-serif;color:var(--green);border:1px solid var(--border);padding:4px 10px;border-radius:4px;}}
+.dot{{animation:pulse 2s infinite;color:var(--green);}}
+.logo{{font:700 18px 'Rajdhani',sans-serif;color:var(--cyan);letter-spacing:2px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;text-align:center;margin-bottom:8px;}}
+.stitle{{font:600 16px 'Rajdhani',sans-serif;color:var(--cyan);letter-spacing:2px;text-transform:uppercase;}}
+.fsec{{font:600 13px 'Rajdhani',sans-serif;color:var(--cyan);letter-spacing:1px;text-transform:uppercase;margin-top:8px;}}
+.div{{height:1px;background:linear-gradient(90deg,var(--cyan),transparent);opacity:.45;margin:6px 0;}}
+.panel{{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;}}
+.scan{{background-image:repeating-linear-gradient(to bottom,rgba(0,245,255,.015)0,rgba(0,245,255,.015)1px,transparent 2px,transparent 4px);}}
+.head{{font:600 16px 'Rajdhani',sans-serif;color:var(--cyan);text-transform:uppercase;letter-spacing:2px;margin-bottom:6px;}}
+.mapbox{{border:1px solid var(--cyan);border-radius:6px;box-shadow:0 0 14px rgba(0,245,255,.15);overflow:hidden;}}
+.stat{{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--cyan);border-radius:6px;padding:10px 12px;margin-bottom:7px;}}
+.sl{{font:11px 'Inter',sans-serif;color:var(--muted);text-transform:uppercase;letter-spacing:1px;}}
+.sv{{font:700 30px 'JetBrains Mono',monospace;line-height:1.1;}}
+.ss{{font:11px 'Inter',sans-serif;color:var(--muted);text-transform:uppercase;}}
+.legend{{font:11px 'JetBrains Mono',monospace;color:var(--text);display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;}}
+.empty{{padding:110px 20px;text-align:center;border:1px dashed var(--border);border-radius:6px;font:700 26px 'Rajdhani',sans-serif;color:var(--cyan);letter-spacing:2px;}}
+.load{{font:13px 'JetBrains Mono',monospace;color:var(--cyan);}}
+.load span{{animation:pulse 1.2s infinite;display:inline-block;}}
+.load span:nth-child(2){{animation-delay:.2s}} .load span:nth-child(3){{animation-delay:.4s}}
+.stButton>button{{border-radius:4px;border:1px solid var(--cyan);background:#0F1118;color:var(--cyan);font:600 13px 'Rajdhani',sans-serif;letter-spacing:1px;text-transform:uppercase;}}
+.stButton>button:hover{{box-shadow:0 0 8px rgba(0,245,255,.25);}}
+div[data-baseweb="select"]>div{{background:#0F1118!important;border-color:var(--border)!important;}}
+div[data-baseweb="select"]>div:focus-within{{border-color:var(--cyan)!important;box-shadow:0 0 0 1px rgba(0,245,255,.25)!important;}}
+[data-baseweb="tag"]{{background:rgba(0,245,255,.12)!important;border:1px solid rgba(0,245,255,.35)!important;color:var(--text)!important;}}
+.stSlider [role="slider"]{{background:var(--cyan)!important;border:2px solid var(--bg)!important;}}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_data(show_spinner=False)
-def load_minimap_image(project_root: str, map_id: str) -> np.ndarray:
-    """Load minimap image for selected map as numpy array."""
-    map_path = os.path.join(project_root, "maps", f"{map_id}.png")
-    image = Image.open(map_path).convert("RGB")
-    return np.array(image)
+def minimap_bytes(root: str, map_id: str) -> bytes:
+    with open(os.path.join(root, "maps", f"{map_id}.png"), "rb") as f:
+        return f.read()
 
 
-def short_user(user_id: str) -> str:
-    if not isinstance(user_id, str):
-        return "unknown"
-    return user_id[:8]
+def minimap_img(root: str, map_id: str) -> Image.Image:
+    return Image.open(io.BytesIO(minimap_bytes(root, map_id))).convert("RGB")
 
 
-def color_map_for_players(user_ids: List[str]) -> Dict[str, str]:
-    palette = (
-        [
-            "#00e5ff",
-            "#ff6b6b",
-            "#ffe66d",
-            "#4ecdc4",
-            "#ff9f1c",
-            "#a29bfe",
-            "#7bed9f",
-            "#feca57",
-            "#48dbfb",
-            "#ff7f50",
-            "#54a0ff",
-            "#eccc68",
-        ]
-        * 50
-    )
-    return {user_id: palette[index] for index, user_id in enumerate(sorted(user_ids))}
+def add_bg(fig: go.Figure, img: Image.Image, w: int, h: int) -> None:
+    fig.add_layout_image(dict(source=img, x=0, y=h, sizex=w, sizey=h, xref="x", yref="y", xanchor="left", yanchor="bottom", layer="below", sizing="stretch"))
+    fig.update_xaxes(range=[0, w], visible=False, showgrid=False)
+    fig.update_yaxes(range=[h, 0], visible=False, showgrid=False, scaleanchor="x", scaleratio=1)
 
 
-def filter_by_player_type(dataframe: pd.DataFrame, player_type: str) -> pd.DataFrame:
-    if player_type == "Humans only":
-        return dataframe[dataframe["is_bot"] == False]
-    if player_type == "Bots only":
-        return dataframe[dataframe["is_bot"] == True]
-    return dataframe
+def short_user(uid: str) -> str:
+    return uid[:8] if isinstance(uid, str) else "unknown"
 
 
-def build_stats(dataframe: pd.DataFrame) -> Dict[str, str]:
-    if dataframe.empty:
-        return {
-            "players": "0 (Humans: 0 | Bots: 0)",
-            "kills": "0 (Human kills: 0 | Bot kills: 0)",
-            "loot": "0",
-            "storm": "0",
-            "duration": "0s",
-        }
-
-    player_flags = dataframe[["user_id", "is_bot"]].drop_duplicates()
-    human_players = int((player_flags["is_bot"] == False).sum())
-    bot_players = int((player_flags["is_bot"] == True).sum())
-
-    kill_rows = dataframe[dataframe["event"].isin(["Kill", "BotKill"])]
-    human_kills = int((kill_rows["is_bot"] == False).sum())
-    bot_kills = int((kill_rows["is_bot"] == True).sum())
-
-    loot_count = int((dataframe["event"] == "Loot").sum())
-    storm_deaths = int((dataframe["event"] == "KilledByStorm").sum())
-
-    ts_values = dataframe["ts"].dropna()
-    if ts_values.empty:
-        duration_text = "0s"
-    else:
-        seconds = int((ts_values.max() - ts_values.min()).total_seconds())
-        minutes, rem_seconds = divmod(max(seconds, 0), 60)
-        duration_text = f"{minutes}m {rem_seconds}s"
-
-    return {
-        "players": f"{human_players + bot_players} (Humans: {human_players} | Bots: {bot_players})",
-        "kills": f"{len(kill_rows)} (Human kills: {human_kills} | Bot kills: {bot_kills})",
-        "loot": str(loot_count),
-        "storm": str(storm_deaths),
-        "duration": duration_text,
-    }
+def filter_player(df, mode: str):
+    if mode == "Humans only":
+        return df[df["is_bot"] == False]
+    if mode == "Bots only":
+        return df[df["is_bot"] == True]
+    return df
 
 
-def add_minimap_background(fig: go.Figure, image: np.ndarray, width: int, height: int) -> None:
-    """Attach minimap image as figure background."""
-    fig.add_layout_image(
-        dict(
-            source=image,
-            x=0,
-            y=height,
-            sizex=width,
-            sizey=height,
-            xref="x",
-            yref="y",
-            xanchor="left",
-            yanchor="bottom",
-            layer="below",
-            sizing="stretch",
-            opacity=1.0,
+def stats(df):
+    if df.empty:
+        return {"pt": 0, "ph": 0, "pb": 0, "kt": 0, "kh": 0, "kb": 0, "loot": 0, "storm": 0, "dur": 0}
+    users = df[["user_id", "is_bot"]].drop_duplicates()
+    ph = int((users["is_bot"] == False).sum())
+    pb = int((users["is_bot"] == True).sum())
+    kills = df[df["event"].isin(["Kill", "BotKill"])]
+    kh = int((kills["is_bot"] == False).sum())
+    kb = int((kills["is_bot"] == True).sum())
+    t = df["ts"].dropna()
+    dur = int((t.max() - t.min()).total_seconds()) if not t.empty else 0
+    return {"pt": ph + pb, "ph": ph, "pb": pb, "kt": len(kills), "kh": kh, "kb": kb, "loot": int((df["event"] == "Loot").sum()), "storm": int((df["event"] == "KilledByStorm").sum()), "dur": max(dur, 0)}
+
+
+def render_cards(stv, animate: bool):
+    p = st.empty()
+    steps = 10 if animate else 1
+    for i in range(1, steps + 1):
+        r = i / steps
+        m, s = divmod(stv["dur"], 60)
+        p.markdown(
+            f"""
+<div class="head">// MATCH INTEL</div><div class="div"></div>
+<div class="stat" style="border-left-color:{PALETTE["cyan"]}"><div class="sl">Players</div><div class="sv" style="color:{PALETTE["cyan"]}">{int(stv["pt"]*r)}</div><div class="ss">humans {stv["ph"]} | bots {stv["pb"]}</div></div>
+<div class="stat" style="border-left-color:{PALETTE["red"]}"><div class="sl">Kills</div><div class="sv" style="color:{PALETTE["red"]}">{int(stv["kt"]*r)}</div><div class="ss">human {stv["kh"]} | bot {stv["kb"]}</div></div>
+<div class="stat" style="border-left-color:{PALETTE["amber"]}"><div class="sl">Loot</div><div class="sv" style="color:{PALETTE["amber"]}">{int(stv["loot"]*r)}</div><div class="ss">resource pickups</div></div>
+<div class="stat" style="border-left-color:{PALETTE["storm"]}"><div class="sl">Storm Deaths</div><div class="sv" style="color:{PALETTE["storm"]}">{int(stv["storm"]*r)}</div><div class="ss">zone pressure</div></div>
+<div class="stat" style="border-left-color:{PALETTE["green"]}"><div class="sl">Duration</div><div class="sv" style="font-size:24px;color:{PALETTE["green"]}">{m:02d}:{s:02d}</div><div class="ss">mm:ss</div></div>
+""",
+            unsafe_allow_html=True,
         )
-    )
-
-    fig.update_xaxes(range=[0, width], visible=False)
-    fig.update_yaxes(range=[height, 0], visible=False, scaleanchor="x", scaleratio=1)
+        if animate:
+            time.sleep(0.05)
 
 
-def main() -> None:
-    project_root = os.path.dirname(os.path.abspath(__file__))
+def event_bar(df) -> go.Figure:
+    c = df["event"].map(to_text).value_counts().sort_values(ascending=True)
+    if c.empty:
+        c = c.reindex(["No Data"]).fillna(0)
+    cols = []
+    for e in c.index:
+        if e in EVENT_STYLE:
+            cols.append(EVENT_STYLE[e]["color"])
+        elif e == "Position":
+            cols.append(PALETTE["cyan"])
+        elif e == "BotPosition":
+            cols.append("#5AA9E6")
+        else:
+            cols.append(PALETTE["muted"])
+    fig = go.Figure([go.Bar(x=c.values.tolist(), y=c.index.tolist(), orientation="h", marker={"color": cols}, text=c.values.tolist(), textposition="outside", hovertemplate="%{y}: %{x}<extra></extra>")])
+    fig.update_layout(paper_bgcolor=PALETTE["bg"], plot_bgcolor=PALETTE["bg"], font={"color": PALETTE["text"], "family": "Inter"}, margin={"l": 100, "r": 8, "t": 6, "b": 8}, height=230, xaxis={"visible": False}, yaxis={"showgrid": False})
+    return fig
 
-    st.title("LILA BLACK - Player Journey Visualization")
-    st.caption("Interactive map analytics for LILA Games level design teams")
+
+def ensure_state():
+    defaults = {"timeline_idx": 0, "playing": False, "play_speed": 1.0, "highlight_user": None, "view_mode": "Paths + Events", "heatmap_type": "Traffic heatmap", "last_anim_match": None}
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def main():
+    css()
+    ensure_state()
+    root = os.path.dirname(os.path.abspath(__file__))
+    st.markdown('<div class="top"><div><div class="title">◈ LILA BLACK  //  MISSION CONTROL</div><div class="sub">Player Journey Intelligence System</div></div><div class="live">LIVE <span class="dot">●</span></div></div>', unsafe_allow_html=True)
 
     with st.sidebar:
-        st.header("Filters")
-
-        map_id = st.selectbox("Map", MAP_OPTIONS, index=0)
-
-        with st.expander("Data Source", expanded=False):
-            default_dir = default_data_dir(project_root)
-            data_dir = st.text_input("Data folder", value=default_dir)
-            st.caption("Tip: Use a folder containing date-wise parquet files.")
-
-        index_df = build_index(data_dir)
-        available_dates = get_available_dates(index_df, map_id)
-
-        if not available_dates:
-            st.warning("No dates found for this map in the selected data folder.")
+        st.markdown('<div class="logo">LILA GAMES</div><div class="stitle">// FILTERS</div>', unsafe_allow_html=True)
+        st.markdown('<div class="fsec">Map Select</div>', unsafe_allow_html=True)
+        map_id = st.selectbox("Map", MAP_OPTIONS, label_visibility="collapsed")
+        st.markdown('<div class="div"></div>', unsafe_allow_html=True)
+        with st.expander("DATA SOURCE", expanded=False):
+            data_dir = st.text_input("Data folder", value=default_data_dir(root))
+        if not data_dir:
+            data_dir = default_data_dir(root)
+        idx = build_index(data_dir)
+        dates = get_available_dates(idx, map_id)
+        if not dates:
+            st.error("No dates found for map.")
             st.stop()
+        st.markdown('<div class="fsec">Date</div>', unsafe_allow_html=True)
+        date = st.selectbox("Date", dates, label_visibility="collapsed")
+        st.markdown('<div class="div"></div>', unsafe_allow_html=True)
+        mids = get_matches(idx, map_id, date)
+        dmap = build_match_display_map(mids)
+        labels = ["-- SELECT MATCH --"] + sorted(dmap.keys())
+        st.markdown('<div class="fsec">Match</div>', unsafe_allow_html=True)
+        label = st.selectbox("Match", labels, label_visibility="collapsed")
+        match_id = dmap.get(label)
+        st.markdown('<div class="div"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="fsec">Players</div>', unsafe_allow_html=True)
+        ptype = st.radio("Players", ["All", "Humans only", "Bots only"], label_visibility="collapsed")
+        st.markdown('<div class="div"></div><div class="fsec">Events</div>', unsafe_allow_html=True)
 
-        date_value = st.selectbox("Date", available_dates, index=0)
+    if match_id is None:
+        l, r = st.columns([1.85, 1], gap="large")
+        with l:
+            st.markdown('<div class="panel scan"><div class="empty">⌖ SELECT A MATCH TO BEGIN ANALYSIS</div></div>', unsafe_allow_html=True)
+        with r:
+            st.markdown('<div class="panel"><div class="head">// MATCH INTEL</div><p style="color:#6B7280">Select a match to activate telemetry.</p></div>', unsafe_allow_html=True)
+        return
 
-        match_ids = get_matches(index_df, map_id, date_value)
-        if not match_ids:
-            st.warning("No matches found for this map/date.")
-            st.stop()
+    loading = st.empty()
+    loading.markdown('<div class="load">// LOADING MATCH DATA<span>.</span><span>.</span><span>.</span></div>', unsafe_allow_html=True)
+    mdf = load_filtered_match_data(data_dir, map_id, date, match_id)
+    for col in ["date", "match_id", "user_id", "map_id", "event"]:
+        if col in mdf.columns:
+            mdf[col] = mdf[col].map(to_text)
+    loading.empty()
+    if mdf.empty:
+        st.warning("No records found for selected match.")
+        return
 
-        display_map = build_match_display_map(match_ids)
-        display_keys = sorted(display_map.keys())
-        selected_display = st.selectbox("Match", display_keys, index=0)
-        selected_match_id = display_map[selected_display]
+    ev = sorted(mdf["event"].dropna().unique().tolist())
+    with st.sidebar:
+        selected_events = st.multiselect("Event types", ev, default=ev, label_visibility="collapsed")
 
-        player_type = st.radio("Player type", ["All", "Humans only", "Bots only"], index=0)
-
-        selected_match_df = load_filtered_match_data(data_dir, map_id, date_value, selected_match_id)
-
-        if selected_match_df.empty:
-            st.warning("No records found for this exact filter combination.")
-            st.stop()
-
-        all_events = sorted(selected_match_df["event"].dropna().unique().tolist())
-        default_events = all_events.copy()
-
-        selected_events = st.multiselect(
-            "Event types",
-            options=all_events,
-            default=default_events,
-        )
-
-        view_mode = st.radio("View mode", ["Paths + Events", "Heatmap"], index=0)
-
-        heatmap_type = None
-        if view_mode == "Heatmap":
-            heatmap_type = st.radio("Heatmap type", HEATMAP_OPTIONS, index=0)
-
-    filtered_df = filter_by_player_type(selected_match_df, player_type)
-
-    if selected_events:
-        filtered_df = filtered_df[filtered_df["event"].isin(selected_events)]
+    fdf = filter_player(mdf, ptype)
+    fdf = fdf[fdf["event"].isin(selected_events)] if selected_events else fdf.iloc[0:0]
+    tsource = filter_player(mdf, ptype)
+    ts_vals = sorted([t for t in tsource["ts"].dropna().unique()])
+    if ts_vals:
+        st.session_state["timeline_idx"] = min(st.session_state["timeline_idx"], len(ts_vals) - 1)
+        cutoff = ts_vals[st.session_state["timeline_idx"]]
+        vdf = fdf[fdf["ts"] <= cutoff].copy()
     else:
-        filtered_df = filtered_df.iloc[0:0]
+        vdf = fdf.copy()
 
-    # Timeline controls operate on the full selected match (before event filtering)
-    timeline_source = filter_by_player_type(selected_match_df, player_type)
-    ts_values = sorted([ts for ts in timeline_source["ts"].dropna().unique()])
+    left, right = st.columns([1.85, 1], gap="large")
+    with right:
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        stv = stats(mdf)
+        render_cards(stv, st.session_state["last_anim_match"] != match_id)
+        st.session_state["last_anim_match"] = match_id
+        st.markdown('<div class="head">// EVENT BREAKDOWN</div>', unsafe_allow_html=True)
+        st.plotly_chart(event_bar(vdf if not vdf.empty else mdf), use_container_width=True, config={"displaylogo": False, "modeBarButtonsToRemove": ["zoom", "pan", "select", "lasso2d", "autoScale", "resetScale"]})
+        st.markdown('<div class="head">// VIEW MODE</div>', unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("PATHS", use_container_width=True):
+                st.session_state["view_mode"] = "Paths + Events"
+        with c2:
+            if st.button("HEATMAP", use_container_width=True):
+                st.session_state["view_mode"] = "Heatmap"
+        hcols = st.columns(4)
+        for i, hm in enumerate(HEATMAPS):
+            with hcols[i]:
+                if st.button(hm.split()[0].upper(), key=f"hm_{hm}", use_container_width=True):
+                    st.session_state["view_mode"] = "Heatmap"
+                    st.session_state["heatmap_type"] = hm
+        st.caption(f"Active: {st.session_state['view_mode']} | {st.session_state['heatmap_type']}")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    if "timeline_idx" not in st.session_state:
-        st.session_state["timeline_idx"] = 0
-    if "playing" not in st.session_state:
-        st.session_state["playing"] = False
-    if "play_speed" not in st.session_state:
-        st.session_state["play_speed"] = 1.0
-    if "highlight_user" not in st.session_state:
-        st.session_state["highlight_user"] = None
+    with left:
+        st.markdown('<div class="panel scan">', unsafe_allow_html=True)
+        st.markdown(f'<div class="head">// TACTICAL MAP :: {map_id}</div>', unsafe_allow_html=True)
+        img = minimap_img(root, map_id)
+        w, h = img.size
+        fig = go.Figure()
+        add_bg(fig, img, w, h)
 
-    if ts_values:
-        max_idx = len(ts_values) - 1
-        st.session_state["timeline_idx"] = min(st.session_state["timeline_idx"], max_idx)
-
-        controls_col1, controls_col2, controls_col3 = st.columns([2, 1, 1])
-
-        with controls_col1:
-            timeline_idx = st.slider(
-                "Match timeline",
-                min_value=0,
-                max_value=max_idx,
-                value=st.session_state["timeline_idx"],
-                key="timeline_slider",
-            )
-            st.session_state["timeline_idx"] = timeline_idx
-
-        with controls_col2:
-            play_pause_label = "Pause" if st.session_state["playing"] else "Play"
-            if st.button(play_pause_label, use_container_width=True):
-                st.session_state["playing"] = not st.session_state["playing"]
-
-        with controls_col3:
-            speed = st.selectbox("Speed", [0.5, 1.0, 2.0], index=[0.5, 1.0, 2.0].index(st.session_state["play_speed"]))
-            st.session_state["play_speed"] = float(speed)
-
-        current_ts = ts_values[st.session_state["timeline_idx"]]
-        base_ts = ts_values[0]
-        elapsed_seconds = max((current_ts - base_ts).total_seconds(), 0)
-        st.caption(f"Showing events up to +{elapsed_seconds:.2f}s")
-
-        visible_df = filtered_df[filtered_df["ts"] <= current_ts].copy()
-    else:
-        visible_df = filtered_df.copy()
-        st.caption("No valid timestamps available; showing complete filtered match.")
-
-    stats = build_stats(selected_match_df)
-    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
-    stat_col1.metric("Total players", stats["players"])
-    stat_col2.metric("Total kills", stats["kills"])
-    stat_col3.metric("Loot pickups", stats["loot"])
-    stat_col4.metric("Storm deaths", stats["storm"])
-    stat_col5.metric("Match duration", stats["duration"])
-
-    map_image = load_minimap_image(project_root, map_id)
-    image_height, image_width = map_image.shape[0], map_image.shape[1]
-
-    fig = go.Figure()
-    add_minimap_background(fig, map_image, image_width, image_height)
-
-    if view_mode == "Heatmap":
-        heatmap_trace = build_heatmap_trace(
-            visible_df,
-            map_id,
-            image_width,
-            image_height,
-            heatmap_type or "Traffic heatmap",
-        )
-        if heatmap_trace is not None:
-            fig.add_trace(heatmap_trace)
+        if st.session_state["view_mode"] == "Heatmap":
+            hm = build_heatmap_trace(vdf, map_id, w, h, st.session_state["heatmap_type"])
+            if hm is not None:
+                fig.add_trace(hm)
         else:
-            st.info("No events available for the selected heatmap type and filters.")
-    else:
-        # Human paths use Position events, bot paths use BotPosition and fallback bot Position rows.
-        path_rows = visible_df[
-            ((visible_df["event"] == "Position") & (visible_df["is_bot"] == False))
-            | ((visible_df["event"].isin(["BotPosition", "Position"])) & (visible_df["is_bot"] == True))
-        ].copy()
+            paths = vdf[((vdf["event"] == "Position") & (vdf["is_bot"] == False)) | ((vdf["event"].isin(["BotPosition", "Position"])) & (vdf["is_bot"] == True))].copy()
+            em = vdf[vdf["event"].isin(EVENT_STYLE.keys())].copy()
+            if not paths.empty:
+                paths["px"], paths["pz"] = map_points_to_pixels(paths["x"], paths["z"], map_id, w, h)
+                users = paths["user_id"].dropna().unique().tolist()
+                colors = {u: ["#00F5FF", "#4CC9F0", "#00FF88", "#FFB800", "#FF3B3B", "#9B59FF", "#E2E8F0"][i % 7] for i, u in enumerate(sorted(users))}
+                hi = st.session_state.get("highlight_user")
+                for u in users:
+                    up = paths[paths["user_id"] == u].sort_values("ts")
+                    is_bot = bool(up["is_bot"].iloc[0])
+                    op = 0.7 if is_bot else 1.0
+                    if hi and hi != u:
+                        op = 0.1
+                    lw = 2.6 if hi and hi == u else 1.5
+                    fig.add_trace(go.Scattergl(x=up["px"], y=up["pz"], mode="lines", line={"color": colors[u], "width": lw, "dash": "dash" if is_bot else "solid"}, opacity=op, name=f"{short_user(u)} ({'BOT' if is_bot else 'HUM'})", customdata=[[u]] * len(up), text=[short_user(u)] * len(up), hovertemplate="User: %{text}<br>Event: Path<br>x=%{x:.1f}, z=%{y:.1f}<extra></extra>"))
+            if not em.empty:
+                em["px"], em["pz"] = map_points_to_pixels(em["x"], em["z"], map_id, w, h)
+                for en, stl in EVENT_STYLE.items():
+                    ss = em[em["event"] == en]
+                    if ss.empty:
+                        continue
+                    fig.add_trace(go.Scattergl(x=ss["px"], y=ss["pz"], mode="markers", marker={"color": stl["color"], "symbol": stl["symbol"], "size": stl["size"], "line": {"width": .5, "color": "#111"}}, name=en, text=[short_user(x) for x in ss["user_id"].tolist()], customdata=ss["ts"].astype(str).tolist(), hovertemplate=f"Event: {en}<br>User: %{{text}}<br>Timestamp: %{{customdata}}<br>x=%{{x:.1f}}, z=%{{y:.1f}}<extra></extra>"))
 
-        event_rows = visible_df[visible_df["event"].isin(EVENT_STYLE.keys())].copy()
+        fig.update_layout(height=760, margin={"l": 0, "r": 0, "t": 0, "b": 0}, paper_bgcolor=PALETTE["bg"], plot_bgcolor=PALETTE["bg"], font={"color": PALETTE["text"], "family": "Inter"}, legend={"orientation": "h", "y": -0.06, "font": {"size": 10}})
+        st.markdown('<div class="mapbox">', unsafe_allow_html=True)
+        pts = plotly_events(fig, click_event=True, select_event=False, hover_event=False, override_height=760, override_width="100%", key="tact_map")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        if not path_rows.empty:
-            path_rows["pixel_x"], path_rows["pixel_z"] = map_points_to_pixels(
-                path_rows["x"], path_rows["z"], map_id, image_width, image_height
-            )
+        if pts and st.session_state["view_mode"] == "Paths + Events":
+            c = pts[0]
+            cn, pn = c.get("curveNumber"), c.get("pointNumber")
+            if cn is not None and pn is not None:
+                tr = fig.data[cn]
+                if hasattr(tr, "customdata") and tr.customdata is not None:
+                    picked = tr.customdata[pn]
+                    if isinstance(picked, (list, tuple)) and picked:
+                        st.session_state["highlight_user"] = picked[0]
+                        st.rerun()
 
-            players = path_rows["user_id"].dropna().unique().tolist()
-            player_colors = color_map_for_players(players)
-            highlighted_user = st.session_state.get("highlight_user")
-
-            for user_id in players:
-                user_path = path_rows[path_rows["user_id"] == user_id].sort_values("ts")
-                if user_path.empty:
-                    continue
-
-                is_bot = bool(user_path["is_bot"].iloc[0])
-                base_opacity = 0.35 if is_bot else 0.95
-                dash_style = "dash" if is_bot else "solid"
-                line_width = 1.6 if is_bot else 2.8
-
-                if highlighted_user and highlighted_user != user_id:
-                    base_opacity = 0.08
-                if highlighted_user and highlighted_user == user_id:
-                    base_opacity = 1.0
-                    line_width = 4.0
-
-                fig.add_trace(
-                    go.Scattergl(
-                        x=user_path["pixel_x"],
-                        y=user_path["pixel_z"],
-                        mode="lines",
-                        line={
-                            "color": player_colors[user_id],
-                            "width": line_width,
-                            "dash": dash_style,
-                        },
-                        opacity=base_opacity,
-                        name=f"{short_user(user_id)} ({'BOT' if is_bot else 'HUM'})",
-                        customdata=[[user_id]] * len(user_path),
-                        hovertemplate=(
-                            "User: %{text}<br>x=%{x:.1f}<br>z=%{y:.1f}<extra></extra>"
-                        ),
-                        text=[short_user(user_id)] * len(user_path),
-                    )
-                )
-
-        if not event_rows.empty:
-            event_rows["pixel_x"], event_rows["pixel_z"] = map_points_to_pixels(
-                event_rows["x"], event_rows["z"], map_id, image_width, image_height
-            )
-
-            for event_name, style in EVENT_STYLE.items():
-                subset = event_rows[event_rows["event"] == event_name]
-                if subset.empty:
-                    continue
-
-                fig.add_trace(
-                    go.Scattergl(
-                        x=subset["pixel_x"],
-                        y=subset["pixel_z"],
-                        mode="markers",
-                        marker={
-                            "color": style["color"],
-                            "symbol": style["symbol"],
-                            "size": style["size"],
-                            "line": {"width": 0.5, "color": "#111111"},
-                        },
-                        name=event_name,
-                        hovertemplate=(
-                            "Event: "
-                            + event_name
-                            + "<br>User: %{text}<br>x=%{x:.1f}<br>z=%{y:.1f}<extra></extra>"
-                        ),
-                        text=[short_user(user) for user in subset["user_id"].tolist()],
-                    )
-                )
-
-    fig.update_layout(
-        height=820,
-        margin={"l": 0, "r": 0, "t": 10, "b": 10},
-        legend={"orientation": "h", "y": -0.05},
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-
-    clicked_points = plotly_events(fig, click_event=True, select_event=False, hover_event=False)
-
-    if clicked_points and view_mode == "Paths + Events":
-        click_info = clicked_points[0]
-        curve_number = click_info.get("curveNumber")
-        point_number = click_info.get("pointNumber")
-
-        if curve_number is not None and point_number is not None:
-            trace = fig.data[curve_number]
-            if hasattr(trace, "customdata") and trace.customdata is not None:
-                selected = trace.customdata[point_number]
-                if isinstance(selected, (list, tuple)) and selected:
-                    st.session_state["highlight_user"] = selected[0]
+        st.markdown(f'<div class="legend"><span style="color:{PALETTE["amber"]}">●</span>BOTKILL <span style="color:{PALETTE["red"]}">●</span>KILL <span style="color:#8B1D1D">●</span>DEATH <span style="color:{PALETTE["storm"]}">●</span>STORM <span style="color:{PALETTE["amber"]}">●</span>LOOT</div>', unsafe_allow_html=True)
+        if st.session_state["view_mode"] == "Paths + Events":
+            a, b = st.columns([1, 3])
+            with a:
+                if st.button("CLEAR HIGHLIGHT", use_container_width=True):
+                    st.session_state["highlight_user"] = None
                     st.rerun()
+            with b:
+                st.caption(f"Highlighted: `{short_user(st.session_state['highlight_user'])}`" if st.session_state.get("highlight_user") else "Click path line to focus one player.")
 
-    if view_mode == "Paths + Events":
-        col_a, col_b = st.columns([1, 3])
-        with col_a:
-            if st.button("Clear highlighted player"):
-                st.session_state["highlight_user"] = None
-                st.rerun()
-        with col_b:
-            highlighted = st.session_state.get("highlight_user")
-            if highlighted:
-                st.caption(f"Highlighted player: {short_user(highlighted)}")
-            else:
-                st.caption("Tip: click a player path to highlight it.")
+        if ts_vals:
+            m = len(ts_vals) - 1
+            t1, t2, t3 = st.columns([3, 1, 1])
+            with t1:
+                st.session_state["timeline_idx"] = st.slider("Mission timeline", 0, m, st.session_state["timeline_idx"], key="timeline")
+            with t2:
+                if st.button("PAUSE" if st.session_state["playing"] else "PLAY", use_container_width=True):
+                    st.session_state["playing"] = not st.session_state["playing"]
+            with t3:
+                sp = st.selectbox("Speed", [0.5, 1.0, 2.0], index=[0.5, 1.0, 2.0].index(st.session_state["play_speed"]))
+                st.session_state["play_speed"] = float(sp)
+            base = ts_vals[0]
+            now = ts_vals[st.session_state["timeline_idx"]]
+            st.caption(f"Mission time: `{max((now-base).total_seconds(),0):.2f}s`")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # Playback runner: keeps app advancing while play mode is active.
-    if ts_values and st.session_state.get("playing"):
-        if st.session_state["timeline_idx"] < len(ts_values) - 1:
-            interval = {0.5: 0.8, 1.0: 0.45, 2.0: 0.2}.get(st.session_state["play_speed"], 0.45)
-            time.sleep(interval)
+    if ts_vals and st.session_state.get("playing"):
+        if st.session_state["timeline_idx"] < len(ts_vals) - 1:
+            time.sleep({0.5: 0.8, 1.0: 0.45, 2.0: 0.2}.get(st.session_state["play_speed"], 0.45))
             st.session_state["timeline_idx"] += 1
             st.rerun()
         else:
@@ -421,4 +376,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
