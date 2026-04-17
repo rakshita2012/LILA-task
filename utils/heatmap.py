@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from utils.coordinate_mapper import map_points_to_pixels
+from utils.coordinate_mapper import clamp_pixels_to_non_black_mask, map_points_to_pixels
 
 HEATMAP_EVENT_MAP = {
     "Kill heatmap": ["Kill", "BotKill"],
@@ -31,6 +32,7 @@ def build_heatmap_trace(
     image_width: int,
     image_height: int,
     heatmap_type: str,
+    map_image: np.ndarray | None = None,
 ) -> Optional[go.Histogram2d]:
     """Build a Plotly 2D histogram trace overlay for the chosen heatmap."""
     filtered = events_for_heatmap(dataframe, heatmap_type)
@@ -40,6 +42,8 @@ def build_heatmap_trace(
     pixel_x, pixel_z = map_points_to_pixels(
         filtered["x"], filtered["z"], map_id, image_width, image_height
     )
+    if map_image is not None:
+        pixel_x, pixel_z = clamp_pixels_to_non_black_mask(pixel_x, pixel_z, map_image)
 
     return go.Histogram2d(
         x=pixel_x,

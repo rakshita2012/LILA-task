@@ -1,4 +1,4 @@
-"""LILA BLACK Mission Control dashboard."""
+﻿"""LILA BLACK Mission Control dashboard."""
 
 from __future__ import annotations
 
@@ -6,18 +6,26 @@ import io
 import os
 import time
 
+import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
+from scipy.stats import gaussian_kde
 from streamlit_plotly_events import plotly_events
 
-from utils.coordinate_mapper import map_points_to_pixels
+from utils.coordinate_mapper import (
+    clamp_pixels_to_non_black_mask,
+    filter_position_outliers,
+    map_points_to_pixels,
+)
 from utils.data_loader import (
     build_index,
     build_match_display_map,
     default_data_dir,
     get_available_dates,
     get_matches,
+    load_date_slice,
     load_filtered_match_data,
 )
 from utils.heatmap import build_heatmap_trace
@@ -187,6 +195,70 @@ def event_bar(df) -> go.Figure:
     return fig
 
 
+@st.cache_data(show_spinner=False)
+def load_map_intelligence_slice(data_dir: str, date: str, map_id: str) -> pd.DataFrame:
+    df = load_date_slice(data_dir, date)
+    if df.empty:
+        return df
+    for col in ["date", "match_id", "user_id", "map_id", "event"]:
+        if col in df.columns:
+            df[col] = df[col].map(to_text)
+    return df[df["map_id"] == map_id].copy()
+
+
+def avg_match_stats(df: pd.DataFrame) -> dict:
+    if df.empty:
+        return {"avg_players": 0.0, "avg_kills": 0.0, "avg_human_kills": 0.0, "avg_loot": 0.0, "avg_storm": 0.0, "total_matches": 0}
+    per_match = df.groupby("match_id").agg(
+        players=("user_id", "nunique"),
+        kills=("event", lambda s: int(s.isin(["Kill", "BotKill"]).sum())),
+        human_kills=("event", lambda s: int((s == "Kill").sum())),
+        loot=("event", lambda s: int((s == "Loot").sum())),
+        storm=("event", lambda s: int((s == "KilledByStorm").sum())),
+    )
+    return {
+        "avg_players": float(per_match["players"].mean()),
+        "avg_kills": float(per_match["kills"].mean()),
+        "avg_human_kills": float(per_match["human_kills"].mean()),
+        "avg_loot": float(per_match["loot"].mean()),
+        "avg_storm": float(per_match["storm"].mean()),
+        "total_matches": int(per_match.shape[0]),
+    }
+
+
+def zone_frame(df: pd.DataFrame, map_id: str, img_w: int, img_h: int, map_np: np.ndarray, events: list[str] | None = None) -> pd.DataFrame:
+    f = df.copy()
+    if events is not None:
+        f = f[f["event"].isin(events)].copy()
+    if f.empty:
+        return f
+    f["px"], f["pz"] = map_points_to_pixels(f["x"], f["z"], map_id, img_w, img_h)
+    f["px"], f["pz"] = clamp_pixels_to_non_black_mask(f["px"], f["pz"], map_np)
+    f["grid_col"] = np.clip((f["px"] / img_w * 4).astype(int), 0, 3)
+    f["grid_row"] = np.clip((f["pz"] / img_h * 4).astype(int), 0, 3)
+    rows = ["Top", "Upper-Mid", "Lower-Mid", "Bottom"]
+    cols = ["Left", "Left-Center", "Right-Center", "Right"]
+    f["zone"] = f["grid_row"].map(lambda i: rows[int(i)]) + "-" + f["grid_col"].map(lambda i: cols[int(i)])
+    return f
+
+
+def classify_zone(pct: float) -> tuple[str, str]:
+    if pct < 2:
+        return "DEAD ZONE", PALETTE["red"]
+    if pct < 8:
+        return "LOW ACTIVITY", PALETTE["amber"]
+    if pct <= 15:
+        return "ACTIVE", PALETTE["green"]
+    return "HOTSPOT", PALETTE["cyan"]
+
+
+def rec_card(text: str) -> str:
+    return (
+        "<div style='background:#12121A;border:1px solid #1E1E2E;border-left:3px solid #FFB800;"
+        "border-radius:6px;padding:10px 12px;margin-bottom:8px;color:#E2E8F0;font-family:Rajdhani,sans-serif;'>"
+        f"INFO {text}</div>"
+    )
+
 def ensure_state():
     defaults = {"timeline_idx": 0, "playing": False, "play_speed": 1.0, "highlight_user": None, "view_mode": "Paths + Events", "heatmap_type": "Traffic heatmap", "last_anim_match": None}
     for k, v in defaults.items():
@@ -305,16 +377,60 @@ def main():
             if not paths.empty:
                 paths["px"], paths["pz"] = map_points_to_pixels(paths["x"], paths["z"], map_id, w, h)
                 users = paths["user_id"].dropna().unique().tolist()
-                colors = {u: ["#00F5FF", "#4CC9F0", "#00FF88", "#FFB800", "#FF3B3B", "#9B59FF", "#E2E8F0"][i % 7] for i, u in enumerate(sorted(users))}
                 hi = st.session_state.get("highlight_user")
                 for u in users:
                     up = paths[paths["user_id"] == u].sort_values("ts")
                     is_bot = bool(up["is_bot"].iloc[0])
-                    op = 0.7 if is_bot else 1.0
+                    op = 0.75 if is_bot else 1.0
                     if hi and hi != u:
                         op = 0.1
-                    lw = 2.6 if hi and hi == u else 1.5
-                    fig.add_trace(go.Scattergl(x=up["px"], y=up["pz"], mode="lines", line={"color": colors[u], "width": lw, "dash": "dash" if is_bot else "solid"}, opacity=op, name=f"{short_user(u)} ({'BOT' if is_bot else 'HUM'})", customdata=[[u]] * len(up), text=[short_user(u)] * len(up), hovertemplate="User: %{text}<br>Event: Path<br>x=%{x:.1f}, z=%{y:.1f}<extra></extra>"))
+                    if is_bot:
+                        outer_color = "#FF6B35"
+                        inner_color = "#FF6B35"
+                        outer_width = 4
+                        inner_width = 1.7
+                        dash_style = "dot"
+                        outer_opacity = 0.24
+                        inner_opacity = 0.75
+                    else:
+                        outer_color = "#00F5FF"
+                        inner_color = "#FFFFFF"
+                        outer_width = 5
+                        inner_width = 2.4
+                        dash_style = "solid"
+                        outer_opacity = 0.28
+                        inner_opacity = 1.0
+
+                    if hi and hi == u:
+                        outer_width += 1.2
+                        inner_width += 0.5
+
+                    # Glow layer for contrast on dark/teal map regions.
+                    fig.add_trace(
+                        go.Scattergl(
+                            x=up["px"],
+                            y=up["pz"],
+                            mode="lines",
+                            line={"color": outer_color, "width": outer_width, "dash": dash_style},
+                            opacity=outer_opacity * op,
+                            showlegend=False,
+                            hoverinfo="skip",
+                        )
+                    )
+                    # Core path layer.
+                    fig.add_trace(
+                        go.Scattergl(
+                            x=up["px"],
+                            y=up["pz"],
+                            mode="lines",
+                            line={"color": inner_color, "width": inner_width, "dash": dash_style},
+                            opacity=inner_opacity * op,
+                            name=f"{short_user(u)} ({'BOT' if is_bot else 'HUM'})",
+                            customdata=[[u]] * len(up),
+                            text=[short_user(u)] * len(up),
+                            hovertemplate="User: %{text}<br>Event: Path<br>x=%{x:.1f}, z=%{y:.1f}<extra></extra>",
+                        )
+                    )
             if not em.empty:
                 em["px"], em["pz"] = map_points_to_pixels(em["x"], em["z"], map_id, w, h)
                 for en, stl in EVENT_STYLE.items():
@@ -364,6 +480,122 @@ def main():
             now = ts_vals[st.session_state["timeline_idx"]]
             st.caption(f"Mission time: `{max((now-base).total_seconds(),0):.2f}s`")
         st.markdown("</div>", unsafe_allow_html=True)
+
+    tab_map_label, tab_intel = st.tabs(["// TACTICAL MAP", "// MAP INTELLIGENCE"])
+    with tab_map_label:
+        st.caption("Tactical map is displayed above in the primary dashboard view.")
+    with tab_intel:
+        st.markdown('<div class="head">// MAP INTELLIGENCE</div>', unsafe_allow_html=True)
+        ia, ib, ic = st.columns(3)
+        with ia:
+            intel_map = st.selectbox("Map selector", MAP_OPTIONS, index=MAP_OPTIONS.index(map_id), key="intel_map")
+        intel_dates = get_available_dates(idx, intel_map)
+        with ib:
+            intel_date = st.selectbox("Date selector", intel_dates, index=(intel_dates.index(date) if date in intel_dates else 0), key="intel_date")
+        with ic:
+            intel_player = st.radio("Player type", ["All", "Humans only", "Bots only"], horizontal=True, key="intel_ptype")
+
+        with st.spinner("// ANALYZING MAP TERRITORY..."):
+            intel_df = load_map_intelligence_slice(data_dir, intel_date, intel_map)
+            intel_df = filter_player(intel_df, intel_player)
+            intel_df = filter_position_outliers(intel_df)
+
+        if intel_df.empty:
+            st.info("No telemetry found for the selected date/map/player filters.")
+        else:
+            mstats = avg_match_stats(intel_df)
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1.metric("AVG PLAYERS PER MATCH", f"{mstats['avg_players']:.1f}")
+            c2.metric("AVG KILLS PER MATCH", f"{mstats['avg_kills']:.1f}")
+            c3.metric("AVG HUMAN KILLS PER MATCH", f"{mstats['avg_human_kills']:.1f}")
+            c4.metric("AVG LOOT PICKUPS", f"{mstats['avg_loot']:.1f}")
+            c5.metric("AVG STORM DEATHS", f"{mstats['avg_storm']:.1f}")
+            c6.metric("TOTAL MATCHES ANALYZED", f"{mstats['total_matches']}")
+
+            st.markdown('<div class="head">// TERRITORY COVERAGE - WHERE PLAYERS GO</div>', unsafe_allow_html=True)
+            intel_img = minimap_img(root, intel_map)
+            intel_np = np.array(intel_img)
+            iw, ih = intel_img.size
+            pos_df = zone_frame(intel_df, intel_map, iw, ih, intel_np, events=["Position", "BotPosition"])
+            kde_fig = go.Figure()
+            add_bg(kde_fig, intel_img, iw, ih)
+            if not pos_df.empty:
+                coords = pos_df[["px", "pz"]].dropna()
+                if len(coords) > 10000:
+                    coords = coords.sample(n=10000, random_state=42)
+                if len(coords) >= 20:
+                    xy = np.vstack([coords["px"].to_numpy(), coords["pz"].to_numpy()])
+                    kde = gaussian_kde(xy)
+                    xi = np.linspace(0, iw - 1, 140)
+                    yi = np.linspace(0, ih - 1, 140)
+                    xx, yy = np.meshgrid(xi, yi)
+                    zz = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
+                    zz = zz / (zz.max() if zz.max() > 0 else 1)
+                    kde_fig.add_trace(
+                        go.Heatmap(
+                            x=xi,
+                            y=yi,
+                            z=zz,
+                            colorscale=[[0.0, "#0A0A2A"], [0.35, "#00F5FF"], [0.7, "#FFB800"], [1.0, "#FF3B3B"]],
+                            opacity=0.6,
+                            showscale=False,
+                        )
+                    )
+            kde_fig.update_layout(height=620, margin={"l": 0, "r": 0, "t": 0, "b": 0}, paper_bgcolor=PALETTE["bg"], plot_bgcolor=PALETTE["bg"], font={"color": PALETTE["text"]})
+            st.plotly_chart(kde_fig, use_container_width=True, config={"displaylogo": False})
+
+            st.markdown('<div class="head">// DEAD ZONE ANALYSIS</div>', unsafe_allow_html=True)
+            if pos_df.empty:
+                st.info("Not enough position events for grid analysis.")
+            else:
+                zone_counts = pos_df["zone"].value_counts()
+                total = max(int(zone_counts.sum()), 1)
+                rows = []
+                for zone_name, count in zone_counts.items():
+                    pct = (count / total) * 100.0
+                    cls, color = classify_zone(pct)
+                    rows.append({"zone": zone_name, "pct": pct, "classification": cls, "color": color})
+                zone_stats = pd.DataFrame(rows).sort_values("pct", ascending=True)
+                table_html = "<table style='width:100%; border-collapse:collapse; font-size:12px;'><thead><tr><th style='text-align:left;padding:6px;border-bottom:1px solid #1E1E2E'>Zone</th><th style='text-align:left;padding:6px;border-bottom:1px solid #1E1E2E'>% of Traffic</th><th style='text-align:left;padding:6px;border-bottom:1px solid #1E1E2E'>Classification</th></tr></thead><tbody>"
+                for _, row in zone_stats.iterrows():
+                    table_html += f"<tr><td>{row['zone']}</td><td>{row['pct']:.2f}%</td><td style='color:{row['color']}'>{row['classification']}</td></tr>"
+                table_html += "</tbody></table>"
+                st.markdown(table_html, unsafe_allow_html=True)
+
+                st.markdown('<div class="head">// LOOT CONCENTRATION</div>', unsafe_allow_html=True)
+                loot_df = zone_frame(intel_df, intel_map, iw, ih, intel_np, events=["Loot"])
+                loot_zone = loot_df["zone"].value_counts().rename("loot_count") if not loot_df.empty else pd.Series(dtype=float, name="loot_count")
+                traffic_zone = zone_counts.rename("traffic_count")
+                comp = pd.concat([traffic_zone, loot_zone], axis=1).fillna(0)
+                comp["traffic_pct"] = comp["traffic_count"] / max(comp["traffic_count"].sum(), 1) * 100.0
+                comp["loot_pct"] = comp["loot_count"] / max(comp["loot_count"].sum(), 1) * 100.0
+                comp = comp.sort_values("loot_count", ascending=False)
+
+                l1, l2 = st.columns(2)
+                with l1:
+                    top5 = comp.head(5).sort_values("loot_count", ascending=True)
+                    fig_l = go.Figure([go.Bar(x=top5["loot_count"].tolist(), y=top5.index.tolist(), orientation="h", marker={"color": PALETTE["amber"]})])
+                    fig_l.update_layout(height=260, paper_bgcolor=PALETTE["bg"], plot_bgcolor=PALETTE["bg"], font={"color": PALETTE["text"]}, margin={"l": 110, "r": 10, "t": 10, "b": 20}, title="Top 5 Most Looted Areas")
+                    st.plotly_chart(fig_l, use_container_width=True, config={"displaylogo": False})
+                with l2:
+                    cmp = comp.sort_values("traffic_pct", ascending=False).head(8)
+                    fig_c = go.Figure()
+                    fig_c.add_bar(name="Traffic %", x=cmp.index.tolist(), y=cmp["traffic_pct"].tolist(), marker_color=PALETTE["cyan"])
+                    fig_c.add_bar(name="Loot %", x=cmp.index.tolist(), y=cmp["loot_pct"].tolist(), marker_color=PALETTE["amber"])
+                    fig_c.update_layout(barmode="group", height=260, paper_bgcolor=PALETTE["bg"], plot_bgcolor=PALETTE["bg"], font={"color": PALETTE["text"]}, margin={"l": 10, "r": 10, "t": 10, "b": 60}, title="Loot Density vs Traffic Density")
+                    st.plotly_chart(fig_c, use_container_width=True, config={"displaylogo": False})
+
+                under = comp[(comp["loot_pct"] > comp["loot_pct"].median()) & (comp["traffic_pct"] < 2)]
+                st.markdown('<div class="head">// ACTIONABLE RECOMMENDATIONS</div>', unsafe_allow_html=True)
+                recs = []
+                for _, row in zone_stats[zone_stats["pct"] < 2].iterrows():
+                    recs.append(f"Zone {row['zone']} receives only {row['pct']:.2f}% of player traffic. Consider adding loot incentives, cover structures, or adjusting storm path to route players through this area.")
+                for zname, row in under.iterrows():
+                    recs.append(f"High loot density in {zname} but only {row['traffic_pct']:.2f}% player traffic. Loot placement may not be attracting players - consider adding visual signposting or improving access routes.")
+                if not recs:
+                    recs.append("Current map usage looks balanced for the selected filters. Focus on micro-adjustments near mid-traffic routes.")
+                for rec in recs:
+                    st.markdown(rec_card(rec), unsafe_allow_html=True)
 
     if ts_vals and st.session_state.get("playing"):
         if st.session_state["timeline_idx"] < len(ts_vals) - 1:
