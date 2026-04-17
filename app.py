@@ -11,8 +11,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
-from scipy.stats import gaussian_kde
 from streamlit_plotly_events import plotly_events
+
+try:
+    from scipy.stats import gaussian_kde
+    HAS_SCIPY = True
+except Exception:
+    gaussian_kde = None
+    HAS_SCIPY = False
 
 from utils.coordinate_mapper import (
     clamp_pixels_to_non_black_mask,
@@ -524,13 +530,25 @@ def main():
                 if len(coords) > 10000:
                     coords = coords.sample(n=10000, random_state=42)
                 if len(coords) >= 20:
-                    xy = np.vstack([coords["px"].to_numpy(), coords["pz"].to_numpy()])
-                    kde = gaussian_kde(xy)
                     xi = np.linspace(0, iw - 1, 140)
                     yi = np.linspace(0, ih - 1, 140)
-                    xx, yy = np.meshgrid(xi, yi)
-                    zz = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
-                    zz = zz / (zz.max() if zz.max() > 0 else 1)
+                    if HAS_SCIPY:
+                        xy = np.vstack([coords["px"].to_numpy(), coords["pz"].to_numpy()])
+                        xx, yy = np.meshgrid(xi, yi)
+                        kde = gaussian_kde(xy)
+                        zz = kde(np.vstack([xx.ravel(), yy.ravel()])).reshape(xx.shape)
+                        zz = zz / (zz.max() if zz.max() > 0 else 1)
+                    else:
+                        hist, xedges, yedges = np.histogram2d(
+                            coords["px"].to_numpy(),
+                            coords["pz"].to_numpy(),
+                            bins=140,
+                            range=[[0, iw], [0, ih]],
+                        )
+                        zz = hist.T
+                        zz = zz / (zz.max() if zz.max() > 0 else 1)
+                        xi = (xedges[:-1] + xedges[1:]) / 2
+                        yi = (yedges[:-1] + yedges[1:]) / 2
                     kde_fig.add_trace(
                         go.Heatmap(
                             x=xi,
