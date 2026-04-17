@@ -11,7 +11,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
-from streamlit_plotly_events import plotly_events
+
+try:
+    from streamlit_plotly_events import plotly_events
+    HAS_PLOTLY_EVENTS = True
+except Exception:
+    plotly_events = None
+    HAS_PLOTLY_EVENTS = False
 
 try:
     from scipy.stats import gaussian_kde
@@ -447,7 +453,19 @@ def main():
 
         fig.update_layout(height=760, margin={"l": 0, "r": 0, "t": 0, "b": 0}, paper_bgcolor=PALETTE["bg"], plot_bgcolor=PALETTE["bg"], font={"color": PALETTE["text"], "family": "Inter"}, legend={"orientation": "h", "y": -0.06, "font": {"size": 10}})
         st.markdown('<div class="mapbox">', unsafe_allow_html=True)
-        pts = plotly_events(fig, click_event=True, select_event=False, hover_event=False, override_height=760, override_width="100%", key="tact_map")
+        pts = []
+        if HAS_PLOTLY_EVENTS:
+            pts = plotly_events(
+                fig,
+                click_event=True,
+                select_event=False,
+                hover_event=False,
+                override_height=760,
+                override_width="100%",
+                key="tact_map",
+            )
+        else:
+            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
         st.markdown("</div>", unsafe_allow_html=True)
 
         if pts and st.session_state["view_mode"] == "Paths + Events":
@@ -469,7 +487,10 @@ def main():
                     st.session_state["highlight_user"] = None
                     st.rerun()
             with b:
-                st.caption(f"Highlighted: `{short_user(st.session_state['highlight_user'])}`" if st.session_state.get("highlight_user") else "Click path line to focus one player.")
+                if HAS_PLOTLY_EVENTS:
+                    st.caption(f"Highlighted: `{short_user(st.session_state['highlight_user'])}`" if st.session_state.get("highlight_user") else "Click path line to focus one player.")
+                else:
+                    st.caption("Interactive click-highlighting is unavailable in this environment, but all paths/events remain visible.")
 
         if ts_vals:
             m = len(ts_vals) - 1
